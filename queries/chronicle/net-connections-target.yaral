@@ -1,0 +1,14 @@
+metadata.event_type = "NETWORK_CONNECTION"
+$srcip = principal.ip
+target.ip = "34.231.161.67"
+match:
+    $srcip over 1h
+outcome:
+    $event_count = count_distinct(metadata.id)
+    $sum_bytes_sent = sum(network.sent_bytes)
+    $sum_bytes_received = sum(network.received_bytes)
+    $dst_ports = array_distinct(target.port)
+order:
+    $sum_bytes_sent desc, $event_count
+limit:
+    5
