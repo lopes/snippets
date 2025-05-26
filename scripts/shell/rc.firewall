@@ -1,0 +1,197 @@
+#!/bin/bash
+#rc.firewall
+#
+#
+# Firewall configuration file.
+#
+#
+# AUTHOR: Joe Lopes <lopes.id>
+# DATE: 2013-01-02
+#
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+##
+# GLOBAL VARIABLES
+#
+IPT="/sbin/iptables"
+USAGE="
+USAGE: "${0##*/}" [start|stop|restart]
+"
+
+# PRIVATE INFO
+PRV_IF="eth0"
+PRV_IP="10.1.2.1"
+PRV_NET="10.1.2.0/24"
+
+# PUBLIC INFO
+PUB_IF="eth1"
+PUB_IP="10.1.3.1"
+PUB_NET="10.1.3.0/24"
+
+
+##
+# FUNCTIONS
+#
+flush_rules() {
+    local table
+
+    for table in filter nat mangle; do
+        $IPT -t $table -F
+        $IPT -t $table -X
+    done
+
+    return $?
+}
+
+set_policies() {
+# set_policies [ACCEPT|REJECT|DROP]
+    $IPT -P INPUT "$1"
+    $IPT -P OUTPUT "$1"
+    $IPT -P FORWARD "$1"
+
+    return $?
+}
+
+packet_forwarding() {
+# Enable/Disable packet forwarding.
+    if [ "$1" = "ON" ]; then
+        echo "1" > /proc/sys/net/ipv4/ip_forward
+    else
+        echo "0" > /proc/sys/net/ipv4/ip_forward
+    fi
+
+    return $?
+}
+
+load_modules() {
+# load_modules foo bar barfoo foobar
+    local module
+
+    for module in $@; do
+        echo modprobe $module
+    done
+
+    return $?
+}
+
+
+##
+# ARGUMENTS PROCESSING
+# But first figure out if is root.
+if [ "$(id -u)" != "0" ]; then
+    echo "ERROR: This script must be run as root."
+    exit 1
+fi
+
+if [ "$#" != "1" ]; then
+    echo "$USAGE"
+  exit 1
+
+else
+    case "$1" in
+        "stop")
+            echo "stopping firewall"
+            packet_forwarding OFF
+            flush_rules
+            set_policies ACCEPT
+            exit 0
+            ;;
+
+        "start" | "restart")
+            echo "starting firewall"
+            packet_forwarding ON
+            flush_rules
+            set_policies DROP
+            load_modules ip_tables iptable_filter ip_nat_ftp iptable_mangle iptable_nat ip_conntrack_ftp ipt_LOG ipt_MASQUERADE
+            ;;
+
+        *)
+            echo "$USAGE"
+            exit 1
+    esac
+fi
+
+
+##
+# FIREWALL RULES
+# In Firewall we trust.
+$IPT -A INPUT -i lo -j ACCEPT
+$IPT -A OUTPUT -o lo -j ACCEPT
+
+# PRIVATE NETWORK TRUST
+# We trust the private network and will forward all traffic from it.
+#$IPT -A FORWARD -i $PRV_IF -o $PUB_IF -j ACCEPT
+#$IPT -A FORWARD -i $PUB_IF -o $PRV_IF -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+# NETWORK TRUST
+# We assume that anyone on the private network can be trusted...
+#$IPT -A INPUT -i $PRV_IF -s $PRV_NET -j ACCEPT
+#$IPT -A OUTPUT -o $PRV_IF -d $PRV_NET -j ACCEPT
+#... and no-one on the public network can be trusted.
+#$IPT -A OUTPUT -o $PUB_IF -j ACCEPT
+#$IPT -A INPUT -i $PUB_IF -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+# TRICKS
+# Some security tricks.
+echo 0 > /proc/sys/net/ipv4/conf/all/accept_source_route  # Disable source routing
+echo 1 > /proc/sys/net/ipv4/tcp_syncookies  # Enable SYN Cookies --to avoid SYN Flood attacks
+echo 1 > /proc/sys/net/ipv4/conf/default/rp_filter  # Firewall will answer in the original interface
+
+# ICMP
+echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects  # Disable ICMP redirects
+echo 1 > /proc/sys/net/ipv4/icmp_echo_ignore_broadcasts  # Disable ping broadcasts
+$IPT -A INPUT -p icmp --icmp-type 0 -j ACCEPT  # Echo response
+$IPT -A INPUT -p icmp --icmp-type 3 -j ACCEPT  # Destination unreachable
+$IPT -A INPUT -p icmp --icmp-type 11 -j ACCEPT  # Time exceeded
+$IPT -A INPUT -p icmp --icmp-type 8 -m limit --limit 1/second -j ACCEPT  # Prevent Ping of Death
+
+# BCP 38 COMPLIANCE
+# tools.ietf.org/html/bcp38
+#$IPT -A FORWARD -i $PRV_IF -s ! $PRV_NET -j DROP  # From LAN
+#$IPT -A FORWARD -i $PUB_IF -s $PRV_NET -j DROP  # To LAN
+
+# BLOCKINGS
+# Specific hosts
+#$IPT -A INPUT -i $PUB_IF -s 10.220.231.236 -j REJECT --reject-with icmp-host-prohibited
+
+# Network
+#$IPT -A INPUT -i $PUB_IF -s 10.67.232.0/24 -j REJECT --reject-with icmp-net-prohibited
+
+# PUBLISHINGS WITH PORT FORWARDING
+# A webmail in the private network.
+#$IPT -t nat -A PREROUTING -i $PUB_IF -d $PUB_IP -p tcp --dport smtp -j DNAT --to 192.168.1.254
+#$IPT -A FORWARD -i $PUB_IF -p tcp --dport smtp -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
+
+# A webserver in the private network.
+#$IPT -t nat -A PREROUTING -i $PUB_IF -d PUB_IP -p tcp --dport http -j DNAT --to 192.168.1.253
+#$IPT -A FORWARD -i $PUB_IF -p tcp --dport http -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
+
+##
+# PUT THE RULES HERE
+#
+
+##
+# END OF RULES
+#
+
+##
+# LOGGING
+# If the packet gets here, it will be dropped.  But logged first.
+$IPT -A INPUT -i $PUB_IF -j LOG --log-prefix="INPUT "
+$IPT -A OUTPUT -o $PUB_IF -j LOG --log-prefix="OUTPUT "
+$IPT -A FORWARD -j $LOG --log-prefix="FORWARD "
+
+exit $?
